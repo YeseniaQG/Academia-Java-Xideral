@@ -1,0 +1,100 @@
+===========================================================
+REPORTE DE CORRECCIÓN: SERVICIO DE GESTIÓN DE PEDIDOS (JAVA)
+===========================================================
+
+1. IDENTIFICACIÓN Y SOLUCIÓN DE BUGS
+-----------------------------------------------------------
+
+BUG 1: Cálculo inseguro y falta de transaccionalidad.
+- Problema: No se valida si la lista de ítems es nula (causa NullPointerException) y no hay @Transactional.
+- Riesgo: Si algo falla tras el cálculo, los datos pueden quedar corruptos en la DB.
+- Corrección: Se añadió validación de nulidad y la anotación @Transactional a nivel de clase.
+
+BUG 2: Uso peligroso de .get() en Optional.
+- Problema: Llamar a .get() directamente lanza una excepción si el ID no existe.
+- Riesgo: Error 500 (Internal Server Error) para el usuario final sin mensaje claro.
+- Corrección: Se usó .orElseThrow() con una excepción personalizada (EntityNotFoundException).
+
+BUG 3: Inyección SQL (Vulnerabilidad Crítica).
+- Problema: Concatenar strings en una consulta nativa permite manipular la base de datos.
+- Riesgo: Un atacante podría borrar tablas o extraer información sensible.
+- Corrección: Se migró a un método de Spring Data JPA (findByCustomerName) que usa parámetros preparados.
+
+BUG 4: Problema de Performance (Carga en Memoria).
+- Problema: Cargar TODOS los pedidos para sumar un total consume demasiada RAM.
+- Riesgo: Caída del servidor (OutOfMemoryError) cuando la base de datos crezca.
+- Corrección: Se delegó el cálculo (SUM) directamente al motor de la base de datos mediante JPQL.
+
+BUG 5: Arquitectura de borrado deficiente.
+- Problema: No se verifica si el recurso existe antes de intentar borrarlo.
+- Riesgo: Inconsistencia en la lógica de negocio y falta de feedback al cliente.
+- Corrección: Se añadió una verificación previa con existsById().
+
+-----------------------------------------------------------
+2. CÓDIGO CORREGIDO (OrderService.java)
+-----------------------------------------------------------
+
+@Service
+@Transactional
+public class OrderService {
+
+    @Autowired
+    private OrderRepository orderRepository;
+
+    public Order createOrder(Order order) {
+        if (order.getItems() == null || order.getItems().isEmpty()) {
+            throw new IllegalArgumentException("El pedido debe contener ítems.");
+        }
+        
+        double total = order.getItems().stream()
+            .mapToDouble(item -> item.getPrice() * item.getQuantity())
+            .sum();
+            
+        order.setTotal(total);
+        return orderRepository.save(order);
+    }
+
+    public Order getOrderById(Long id) {
+        return orderRepository.findById(id)
+            .orElseThrow(() -> new EntityNotFoundException("No se encontró el pedido: " + id));
+    }
+
+    public List<Order> findOrdersByCustomer(String customerName) {
+        return orderRepository.findByCustomerName(customerName);
+    }
+
+    public double getTotalRevenue() {
+        Double total = orderRepository.calculateTotalRevenue();
+        return total != null ? total : 0.0;
+    }
+
+    public void deleteOrder(Long id) {
+        if (!orderRepository.existsById(id)) {
+            throw new EntityNotFoundException("No existe el pedido con ID: " + id);
+        }
+        orderRepository.deleteById(id);
+    }
+}
+
+-----------------------------------------------------------
+3. UNIT TESTS (JUnit 5 + Mockito)
+-----------------------------------------------------------
+
+@ExtendWith(MockitoExtension.class)
+class OrderServiceTest {
+
+    @Mock
+    private OrderRepository orderRepository;
+
+    @InjectMocks
+    private OrderService orderService;
+
+    @Test
+    void whenOrderNotFound_thenThrowException() {
+        when(orderRepository.findById(1L)).thenReturn(Optional.empty());
+        assertThrows(EntityNotFoundException.class, () -> orderService.getOrderById(1L));
+    }
+
+    @Test
+    void calculateTotalCorrectly_whenCreatingOrder() {
+        Order order =
